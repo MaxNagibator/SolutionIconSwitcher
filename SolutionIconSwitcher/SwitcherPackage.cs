@@ -6,12 +6,9 @@ using System;
 using System.Drawing;
 using System.IO;
 using System.Linq;
-using System.Reflection;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Forms;
 using Task = System.Threading.Tasks.Task;
 
 namespace SolutionIconSwitcher
@@ -26,17 +23,37 @@ namespace SolutionIconSwitcher
         private string _solutionPath;
         private MessageWindow _messageWindow;
 
+        public void HandleOpenSolution()
+        {
+            Logger.LogDebug($"Начало обновления иконки [Поток: {Thread.CurrentThread.ManagedThreadId}]");
+
+            if (TaskbarManager.IsPlatformSupported == false)
+            {
+                Logger.LogWarning("API панели задач недоступно");
+                return;
+            }
+
+            try
+            {
+                RefreshTaskbarIcon();
+            }
+            catch (Exception exception)
+            {
+                Logger.LogError($"Ошибка обновления: {exception.Dump()}");
+            }
+        }
+
         protected override async Task InitializeAsync(CancellationToken cancellationToken, IProgress<ServiceProgressData> progress)
         {
-            Logger.LogInfo("Package initialization started");
+            Logger.LogInfo("Запущена инициализация пакета");
 
             try
             {
                 await base.InitializeAsync(cancellationToken, progress);
-                Logger.LogDebug("Base initialization completed");
+                Logger.LogDebug("Базовая инициализация завершена");
 
                 var isSolutionLoaded = await IsSolutionLoadedAsync();
-                Logger.LogDebug($"Solution loaded state: {isSolutionLoaded}");
+                Logger.LogDebug($"Состояние загрузки решения: {isSolutionLoaded}");
 
                 if (isSolutionLoaded)
                 {
@@ -45,49 +62,29 @@ namespace SolutionIconSwitcher
 
                 await JoinableTaskFactory.SwitchToMainThreadAsync();
                 _messageWindow = new MessageWindow(this);
-                Logger.LogDebug("Message window created");
+                Logger.LogDebug("Окно сообщений создано");
             }
             catch (Exception exception)
             {
-                Logger.LogError($"Initialization failed: {exception.Dump()}");
+                Logger.LogError($"Ошибка инициализации: {exception.Dump()}");
                 throw;
             }
         }
 
         protected override void Dispose(bool disposing)
         {
-            Logger.LogDebug("Package disposal started");
+            Logger.LogDebug("Начало освобождения ресурсов пакета");
 
             try
             {
                 _messageWindow?.Dispose();
                 base.Dispose(disposing);
-                Logger.LogDebug("Package disposed");
+                Logger.LogDebug("Ресурсы пакета освобождены");
             }
             catch (Exception exception)
             {
-                Logger.LogError($"Dispose error: {exception.Dump()}");
+                Logger.LogError($"Ошибка освобождения: {exception.Dump()}");
                 throw;
-            }
-        }
-
-        private void HandleOpenSolution()
-        {
-            Logger.LogDebug($"Starting icon refresh [Thread: {Thread.CurrentThread.ManagedThreadId}]");
-
-            try
-            {
-                if (TaskbarManager.IsPlatformSupported == false)
-                {
-                    Logger.LogWarning("Taskbar API unavailable");
-                    return;
-                }
-
-                RefreshTaskbarIcon();
-            }
-            catch (Exception exception)
-            {
-                Logger.LogError($"Refresh failed: {exception.Dump()}");
             }
         }
 
@@ -111,11 +108,11 @@ namespace SolutionIconSwitcher
             {
                 foreach (var iconPath in _iconPostfixes.Select(x => _solutionPath + x))
                 {
-                    Logger.LogDebug($"Checking icon: {iconPath}");
+                    Logger.LogDebug($"Проверка иконки: {iconPath}");
 
                     if (File.Exists(iconPath) == false)
                     {
-                        Logger.LogWarning($"Icon file missing: {iconPath}");
+                        Logger.LogWarning($"Файл иконки отсутствует: {iconPath}");
                         TaskbarManager.Instance.SetOverlayIcon(null, "");
                         continue;
                     }
@@ -124,13 +121,13 @@ namespace SolutionIconSwitcher
                     {
                         if (icon == null)
                         {
-                            Logger.LogWarning($"Icon cannot be loaded: {iconPath}");
+                            Logger.LogWarning($"Невозможно загрузить иконку: {iconPath}");
                         }
                         else
                         {
-                            Logger.LogDebug($"Icon loaded: {icon.Size.Width}x{icon.Size.Height}");
+                            Logger.LogDebug($"Иконка загружена: {icon.Size.Width}x{icon.Size.Height}");
                             TaskbarManager.Instance.SetOverlayIcon(icon, "");
-                            Logger.LogDebug("Icon updated successfully");
+                            Logger.LogDebug("Иконка успешно обновлена");
                             break;
                         }
                     }
@@ -138,157 +135,9 @@ namespace SolutionIconSwitcher
             }
             catch (Exception exception)
             {
-                Logger.LogError($"Icon error: {exception.Dump()}");
+                Logger.LogError($"Ошибка иконки: {exception.Dump()}");
                 TaskbarManager.Instance.SetOverlayIcon(null, "");
             }
-        }
-
-        private sealed class MessageWindow : NativeWindow, IDisposable
-        {
-            private const int ACTIVATEAPP = 0x001C;
-
-            private const string WindowActivated = nameof(WindowActivated);
-            private const string TaskbarCreated = nameof(TaskbarCreated);
-
-            private readonly TimeSpan _delay = TimeSpan.FromSeconds(10);
-            private readonly SwitcherPackage _package;
-            private readonly uint _taskbarCreatedMsg;
-
-            private bool _isTryRefresh;
-
-            public MessageWindow(SwitcherPackage package)
-            {
-                _package = package;
-                _taskbarCreatedMsg = RegisterWindowMessage(TaskbarCreated);
-                CreateHandle(new CreateParams());
-                Logger.LogDebug("Message window initialized");
-            }
-
-            public void Dispose()
-            {
-                if (Handle == IntPtr.Zero)
-                {
-                    return;
-                }
-
-                Logger.LogDebug("Destroying message window");
-                DestroyHandle();
-            }
-
-            protected override void WndProc(ref Message message)
-            {
-                try
-                {
-                    Logger.LogDebug($"Message: 0x{message.Msg:X4} WParam: 0x{message.WParam.ToInt64():X8} LParam: 0x{message.LParam.ToInt64():X8}");
-
-                    switch (message.Msg)
-                    {
-                        case int _ when message.Msg == (int)_taskbarCreatedMsg:
-                            HandleSystemEvent(TaskbarCreated);
-                            break;
-
-                        case ACTIVATEAPP:
-                            HandleSystemEvent(WindowActivated);
-                            break;
-                    }
-                }
-                catch (Exception exception)
-                {
-                    Logger.LogError($"Message error: {exception.Dump()}");
-                }
-                finally
-                {
-                    base.WndProc(ref message);
-                }
-            }
-
-            [DllImport("user32.dll", CharSet = CharSet.Auto)]
-            private static extern uint RegisterWindowMessage(string lpString);
-
-            private void HandleSystemEvent(string eventName)
-            {
-                Logger.LogDebug($"Handling event: {eventName}");
-
-                if (_isTryRefresh && eventName != TaskbarCreated)
-                {
-                    Logger.LogDebug($"Event {eventName} skipped - refresh already been on last {_delay.TotalSeconds} seconds");
-                    return;
-                }
-
-                _isTryRefresh = true;
-
-                Logger.LogDebug($"HandleOpenSolution by {eventName}");
-
-                _package.JoinableTaskFactory.RunAsync(async () =>
-                    {
-                        try
-                        {
-                            await _package.JoinableTaskFactory.SwitchToMainThreadAsync();
-                            _package.HandleOpenSolution();
-
-                            if (eventName != TaskbarCreated)
-                            {
-                                await Task.Delay(_delay);
-                            }
-                        }
-                        finally
-                        {
-                            _isTryRefresh = false;
-                        }
-                    })
-                    .FileAndForget("HandleSystemEvent");
-            }
-        }
-    }
-
-    internal static class Logger
-    {
-        private const string LogFile = "SolutionIconSwitcher.log";
-        private static readonly string LogPath = Path.Combine(Path.GetTempPath(), "SolutionIconSwitcher", LogFile);
-        private static readonly object Lock = new object();
-
-        static Logger()
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(LogPath) ?? string.Empty);
-            LogDebug($"=== Session started v{Assembly.GetExecutingAssembly().GetName().Version} ===");
-        }
-
-        public static void LogInfo(string message, [CallerMemberName] string caller = "", [CallerLineNumber] int line = 0)
-        {
-            WriteEntry("INFO", message, caller, line);
-        }
-
-        public static void LogWarning(string message, [CallerMemberName] string caller = "", [CallerLineNumber] int line = 0)
-        {
-            WriteEntry("WARN", message, caller, line);
-        }
-
-        public static void LogError(string message, [CallerMemberName] string caller = "", [CallerLineNumber] int line = 0)
-        {
-            WriteEntry("ERROR", message, caller, line);
-        }
-
-        public static void LogDebug(string message, [CallerMemberName] string caller = "", [CallerLineNumber] int line = 0)
-        {
-#if DEBUG
-            WriteEntry("DEBUG", message, caller, line);
-#endif
-        }
-
-        private static void WriteEntry(string level, string message, string caller, int line)
-        {
-            lock (Lock)
-            {
-                File.AppendAllText(LogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{level,-5}] {caller}:{line} - {message}\n");
-            }
-        }
-    }
-
-    internal static class ExceptionExtensions
-    {
-        public static string Dump(this Exception exception)
-        {
-            return $"{exception.GetType().Name}: {exception.Message}\n{exception.StackTrace}";
         }
     }
 }
