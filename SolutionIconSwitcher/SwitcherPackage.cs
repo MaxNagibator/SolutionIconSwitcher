@@ -5,6 +5,7 @@ using Microsoft.WindowsAPICodePack.Taskbar;
 using System;
 using System.Drawing;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -21,7 +22,8 @@ namespace SolutionIconSwitcher
     public sealed class SwitcherPackage : AsyncPackage
     {
         public const string PackageGuidString = "4417bdde-9c84-4b53-bf7b-a3ce30921b55";
-        private string _iconPath;
+        private readonly string[] _iconPostfixes = { ".solutioniconswitcher.user", ".sis.user" };
+        private string _solutionPath;
         private MessageWindow _messageWindow;
 
         protected override async Task InitializeAsync(CancellationToken cancellationToken, IProgress<ServiceProgressData> progress)
@@ -34,7 +36,7 @@ namespace SolutionIconSwitcher
                 Logger.LogDebug("Base initialization completed");
 
                 var isSolutionLoaded = await IsSolutionLoadedAsync();
-                Logger.LogInfo($"Solution loaded state: {isSolutionLoaded}");
+                Logger.LogDebug($"Solution loaded state: {isSolutionLoaded}");
 
                 if (isSolutionLoaded)
                 {
@@ -43,7 +45,7 @@ namespace SolutionIconSwitcher
 
                 await JoinableTaskFactory.SwitchToMainThreadAsync();
                 _messageWindow = new MessageWindow(this);
-                Logger.LogInfo("Message window created");
+                Logger.LogDebug("Message window created");
             }
             catch (Exception exception)
             {
@@ -54,13 +56,13 @@ namespace SolutionIconSwitcher
 
         protected override void Dispose(bool disposing)
         {
-            Logger.LogInfo("Package disposal started");
+            Logger.LogDebug("Package disposal started");
 
             try
             {
                 _messageWindow?.Dispose();
                 base.Dispose(disposing);
-                Logger.LogInfo("Package disposed");
+                Logger.LogDebug("Package disposed");
             }
             catch (Exception exception)
             {
@@ -71,11 +73,11 @@ namespace SolutionIconSwitcher
 
         private void HandleOpenSolution()
         {
-            Logger.LogInfo($"Starting icon refresh [Thread: {Thread.CurrentThread.ManagedThreadId}]");
+            Logger.LogDebug($"Starting icon refresh [Thread: {Thread.CurrentThread.ManagedThreadId}]");
 
             try
             {
-                if (TaskbarManager.IsPlatformSupported ==false)
+                if (TaskbarManager.IsPlatformSupported == false)
                 {
                     Logger.LogWarning("Taskbar API unavailable");
                     return;
@@ -96,8 +98,7 @@ namespace SolutionIconSwitcher
 
             ErrorHandler.ThrowOnFailure(solService.GetProperty((int)__VSPROPID.VSPROPID_SolutionFileName, out var solutionPathObj));
 
-            var solutionPath = solutionPathObj.ToString();
-            _iconPath = $"{solutionPath}.solutioniconswitcher.user";
+            _solutionPath = solutionPathObj.ToString();
 
             ErrorHandler.ThrowOnFailure(solService.GetProperty((int)__VSPROPID.VSPROPID_IsSolutionOpen, out var isOpenObj));
 
@@ -108,26 +109,30 @@ namespace SolutionIconSwitcher
         {
             try
             {
-                Logger.LogInfo($"Checking icon: {_iconPath}");
-
-                if (File.Exists(_iconPath) == false)
+                foreach (var iconPath in _iconPostfixes.Select(x => _solutionPath + x))
                 {
-                    Logger.LogWarning("Icon file missing");
-                    TaskbarManager.Instance.SetOverlayIcon(null, "");
-                    return;
-                }
+                    Logger.LogDebug($"Checking icon: {iconPath}");
 
-                using (var icon = Icon.ExtractAssociatedIcon(_iconPath))
-                {
-                    if (icon == null)
+                    if (File.Exists(iconPath) == false)
                     {
-                        Logger.LogWarning("Icon cannot be loaded");
+                        Logger.LogWarning($"Icon file missing: {iconPath}");
+                        TaskbarManager.Instance.SetOverlayIcon(null, "");
+                        continue;
                     }
-                    else
+
+                    using (var icon = Icon.ExtractAssociatedIcon(iconPath))
                     {
-                        Logger.LogInfo($"Icon loaded: {icon.Size.Width}x{icon.Size.Height}");
-                        TaskbarManager.Instance.SetOverlayIcon(icon, "");
-                        Logger.LogSuccess("Icon updated successfully");
+                        if (icon == null)
+                        {
+                            Logger.LogWarning($"Icon cannot be loaded: {iconPath}");
+                        }
+                        else
+                        {
+                            Logger.LogDebug($"Icon loaded: {icon.Size.Width}x{icon.Size.Height}");
+                            TaskbarManager.Instance.SetOverlayIcon(icon, "");
+                            Logger.LogDebug("Icon updated successfully");
+                            break;
+                        }
                     }
                 }
             }
@@ -141,15 +146,22 @@ namespace SolutionIconSwitcher
         private sealed class MessageWindow : NativeWindow, IDisposable
         {
             private const int ACTIVATEAPP = 0x001C;
+
+            private const string WindowActivated = nameof(WindowActivated);
+            private const string TaskbarCreated = nameof(TaskbarCreated);
+
+            private readonly TimeSpan _delay = TimeSpan.FromSeconds(10);
             private readonly SwitcherPackage _package;
             private readonly uint _taskbarCreatedMsg;
+
+            private bool _isTryRefresh;
 
             public MessageWindow(SwitcherPackage package)
             {
                 _package = package;
-                _taskbarCreatedMsg = RegisterWindowMessage("TaskbarCreated");
+                _taskbarCreatedMsg = RegisterWindowMessage(TaskbarCreated);
                 CreateHandle(new CreateParams());
-                Logger.LogInfo("Message window initialized");
+                Logger.LogDebug("Message window initialized");
             }
 
             public void Dispose()
@@ -167,22 +179,22 @@ namespace SolutionIconSwitcher
             {
                 try
                 {
-                    Logger.LogDebug($"Message: 0x{message.Msg:X4} " + $"WParam: 0x{message.WParam.ToInt64():X8} " + $"LParam: 0x{message.LParam.ToInt64():X8}");
+                    Logger.LogDebug($"Message: 0x{message.Msg:X4} WParam: 0x{message.WParam.ToInt64():X8} LParam: 0x{message.LParam.ToInt64():X8}");
 
                     switch (message.Msg)
                     {
                         case int _ when message.Msg == (int)_taskbarCreatedMsg:
-                            HandleSystemEvent("TaskbarCreated");
+                            HandleSystemEvent(TaskbarCreated);
                             break;
 
                         case ACTIVATEAPP:
-                            HandleSystemEvent("SystemSettingsChanged");
+                            HandleSystemEvent(WindowActivated);
                             break;
                     }
                 }
-                catch (Exception ex)
+                catch (Exception exception)
                 {
-                    Logger.LogError($"Message error: {ex.Dump()}");
+                    Logger.LogError($"Message error: {exception.Dump()}");
                 }
                 finally
                 {
@@ -195,18 +207,36 @@ namespace SolutionIconSwitcher
 
             private void HandleSystemEvent(string eventName)
             {
-                Logger.LogInfo($"Handling event: {eventName}");
+                Logger.LogDebug($"Handling event: {eventName}");
 
-                Task.Run(async () =>
+                if (_isTryRefresh && eventName != TaskbarCreated)
                 {
-                    await Task.Delay(500);
+                    Logger.LogDebug($"Event {eventName} skipped - refresh already been on last {_delay.TotalSeconds} seconds");
+                    return;
+                }
 
-                    await _package.JoinableTaskFactory.RunAsync(async () =>
+                _isTryRefresh = true;
+
+                Logger.LogDebug($"HandleOpenSolution by {eventName}");
+
+                _package.JoinableTaskFactory.RunAsync(async () =>
                     {
-                        await _package.JoinableTaskFactory.SwitchToMainThreadAsync();
-                        _package.HandleOpenSolution();
-                    });
-                });
+                        try
+                        {
+                            await _package.JoinableTaskFactory.SwitchToMainThreadAsync();
+                            _package.HandleOpenSolution();
+
+                            if (eventName != TaskbarCreated)
+                            {
+                                await Task.Delay(_delay);
+                            }
+                        }
+                        finally
+                        {
+                            _isTryRefresh = false;
+                        }
+                    })
+                    .FileAndForget("HandleSystemEvent");
             }
         }
     }
@@ -220,7 +250,7 @@ namespace SolutionIconSwitcher
         static Logger()
         {
             Directory.CreateDirectory(Path.GetDirectoryName(LogPath) ?? string.Empty);
-            LogInfo($"=== Session started v{Assembly.GetExecutingAssembly().GetName().Version} ===");
+            LogDebug($"=== Session started v{Assembly.GetExecutingAssembly().GetName().Version} ===");
         }
 
         public static void LogInfo(string message, [CallerMemberName] string caller = "", [CallerLineNumber] int line = 0)
@@ -245,16 +275,11 @@ namespace SolutionIconSwitcher
 #endif
         }
 
-        public static void LogSuccess(string message, [CallerMemberName] string caller = "", [CallerLineNumber] int line = 0)
-        {
-            WriteEntry("SUCCESS", message, caller, line);
-        }
-
         private static void WriteEntry(string level, string message, string caller, int line)
         {
             lock (Lock)
             {
-                File.AppendAllText(LogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{level,-7}] {caller}:{line} - {message}\n");
+                File.AppendAllText(LogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{level,-5}] {caller}:{line} - {message}\n");
             }
         }
     }
